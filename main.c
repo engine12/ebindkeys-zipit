@@ -5,6 +5,7 @@
 
 #define _GNU_SOURCE
 #define _XOPEN_SOURCE
+#define UINPUT_DEV_NAME "ebindkeys-uinput"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,29 +17,86 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-
+#include <sys/select.h>
+#include <sys/time.h>
+#include <termios.h>
 #include <signal.h>
+#include <linux/input.h>
+#include <linux/uinput.h>
+#include <inttypes.h>
+#include <sys/mman.h>
 
 #include "confuse.h"
 #include "ebindkeys.h"
 
+#define MAP_SIZE 4096UL
+
+#define GPIO 98	/* lid switch */
+#define GPIO_BASE 0x40E00000 /* PXA270 GPIO Register Base */
+
+typedef unsigned long u32;
+
+int regoffset(int gpio) {
+	if (gpio < 32) return 0;
+	if (gpio < 64) return 4;
+	if (gpio < 96) return 8;
+	return 0x100;
+}
+
+int gpio_read(void *map_base, int gpio) {
+	volatile u32 *reg = (u32*)((u32)map_base + regoffset(gpio));
+	return (*reg >> (gpio&31)) & 1;
+}
+
+#define LID_CLOSED  0
+#define LID_OPEN    1
+#define LID_UNKNOWN 255
+int lidstate() {
+	int fd;
+	int retval;
+	void *map_base;
+
+	fd = open("/dev/mem", O_RDONLY | O_SYNC);
+   	if (fd < 0) {printf("Please run as root"); exit(1);}
+
+    	map_base = mmap(0, MAP_SIZE, PROT_READ, MAP_SHARED, fd, GPIO_BASE);
+	if(map_base == (void *) -1) exit(255);
+
+	switch(gpio_read(map_base,98))
+	{
+		case 0: /* lid is closed */
+			retval = LID_CLOSED;
+			break;
+
+		case 1: /* lid is open */
+			retval = LID_OPEN;
+			break;
+
+		default:
+			retval = LID_UNKNOWN;
+	}
+
+	if(munmap(map_base, MAP_SIZE) == -1) exit(255) ;
+	close(fd);
+	return retval;
+}
 
 int keys_on() {	//turns backlight power on or off
 
 	FILE *key = fopen("/sys/class/backlight/pwm-backlight.1/bl_power", "w");
-	
-	//WARNING: opposite of what you might expect - 1 is off and 0 is on	
+
+	//WARNING: opposite of what you might expect - 1 is off and 0 is on
 	if (key != NULL) {
 		fputs("0", key);
-		fclose(key);	
-	} 
+		fclose(key);
+	}
 }
 
 
-void onKeyPress() {	//reset timer in /tmp/keytimer 
+void onKeyPress() {	//reset timer in /tmp/keytimer
 
 	FILE *key = fopen("/tmp/keypressed", "w");
-	
+
 	if (key != NULL) {
 		fputs("1", key);
 		fclose(key);
@@ -108,12 +166,10 @@ int main (int argc, char **argv)
 				free(conf_file);
 				conf_file = strdup(optarg);
 				break;
-				
 			case 'd':
 				/* don't fork at startup */
 				cmd_opts |= EBK_NODAEMON;
-				break;
-				
+				break;		
 			case 's':
 				/* don't fork when executing actions. */
 				cmd_opts |= EBK_NOFORK;
@@ -130,8 +186,7 @@ int main (int argc, char **argv)
 				break;
 			case ':':
 				exit(1);
-				break;
-				
+				break;				
 			case 'h':
 				break;
 			/*default:
@@ -143,12 +198,18 @@ int main (int argc, char **argv)
 	
 	/* check if a conf file exists, if not, bitch at user */
 	FILE *conf_check;
-	
-	if (! (conf_check = fopen(conf_file, "r")) )
+	if (! (conf_check = fopen(conf_file, "r")) ) // check home or command line dir first
+	{
+		fprintf(stderr, "%s: could not open config file %s\n", argv[0], conf_file);
+		free(conf_file);
+		conf_file = "/etc/ebindkeysrc";
+		if (! (conf_check = fopen(conf_file, "r")) ) // check etc
 	{
 		fprintf(stderr, "%s: could not open config file %s\n", argv[0], conf_file);
 		exit(2);
 	} else fclose(conf_check);
+	} else fclose(conf_check);
+	printf("%s: Loaded config file %s\n", argv[0], conf_file);
 
 	settings *conf = load_settings(conf_file);
 	
@@ -172,20 +233,56 @@ int main (int argc, char **argv)
 	/* points to the last struct in the linked list */
 	key_press *list_end = list_start;
 	key_press *list_cur, *list_prev;
-	
-	struct input_event *ievent;
-	
+
+	struct input_event ievent;
+
 	/* No buffering, for now. */
 	int eventfh;
-	
 	if (! (eventfh = open(conf->dev , O_RDONLY )))
 	{
 		fprintf(stderr, "%s: Error opening event device %s", argv[0], conf->dev);
 		exit(3);
 	}
-	
-	ievent = calloc(1, sizeof(struct input_event));
-	
+
+	/* Get exclusive access to the input device so we
+	 * can ignore keypresses when lid is closed */
+	int result = 0;
+	char name[256] = "Unknown";
+
+	result = ioctl(eventfh, EVIOCGNAME(sizeof(name)), name);
+	result = ioctl(eventfh, EVIOCGRAB, 1);
+
+	/* Setup uinput device for writing */
+	int ufile, res;
+	struct uinput_user_dev uinp;
+	ufile = open("/dev/input/uinput", O_WRONLY);
+	if (ufile == -1)
+		ufile = open("/dev/uinput", O_WRONLY);
+	if (ufile == -1)
+	{
+		fprintf(stderr, "Error opening uinput device! Is the uinput module loaded?");
+		exit(3);
+	}
+	ioctl(ufile, UI_SET_EVBIT, EV_KEY);
+	ioctl(ufile, UI_SET_EVBIT, EV_REL);
+	for (i = 0; i < KEY_MAX; i++)
+		ioctl(ufile, UI_SET_KEYBIT, i);
+	memset(&uinp, 0, sizeof(uinp));
+	uinp.id.version = 1;
+	uinp.id.bustype = BUS_USB;
+	strncpy(uinp.name, UINPUT_DEV_NAME, sizeof(UINPUT_DEV_NAME));
+	res = write(ufile, &uinp, sizeof(uinp));
+	if (res == -1)
+	{
+		fprintf(stderr, "Error setting up uinput device!");
+		exit(3);
+	}
+	if (ioctl(ufile, UI_DEV_CREATE) < 0)
+	{
+		fprintf(stderr, "Error creating uinput device!");
+		exit(3);
+	}
+
 	/* How does a good parent prevent his children from becoming
 	 * part of the zombie hoard? He ignores them! */
 	signal(SIGCHLD, SIG_IGN);
@@ -197,7 +294,7 @@ int main (int argc, char **argv)
 
 	for(;;)
 	{
-		if ( read(eventfh, ievent, sizeof(struct input_event)) == -1 )
+		if ( read(eventfh, &ievent, sizeof(struct input_event)) == -1 )
 		{
 			/* read() will always get sizeof(struct input_event) number
 			 * of bytes, the kernel gurantees this, so we only worry
@@ -206,29 +303,34 @@ int main (int argc, char **argv)
 			perror("Error reading device");
 			exit(3);
 		}
-		
-		/* Key has been pressed */
-		if ( ievent->type == EV_KEY &&
-			 ievent->value == 1 )
-			{
-				/*reset the keyboard timer and turn on the lights */
-				onKeyPress();
 
-				/* add to depressed struct */
-				list_end->code = ievent->code;
-				list_end->next = calloc(1,sizeof(key_press));
-				list_end = list_end->next;
-				list_end->next = NULL;
-				
-				/* check if we've hit a combo here */
-				
-				count = list_len(list_start);
-				event_cur = event_first;
-				while ( event_cur->next != NULL ) /* cycle through all events */
+		/* Do nothing if lid is closed */
+		if ( lidstate() != 0 ) {
+			/* write the key press/release to uinput */
+			write(ufile, &ievent, sizeof(struct input_event));
+
+			/* Key has been pressed */
+			if ( ievent.type == EV_KEY &&
+				 ievent.value == 1 )
 				{
-					/* don't bother matching keys if the key count doesn't match
-					 * the keys pressed count */
-					if ( count == event_cur->key_count)
+					/*reset the keyboard timer and turn on the lights */
+					onKeyPress();
+
+					/* add to depressed struct */
+					list_end->code = ievent.code;
+					list_end->next = calloc(1,sizeof(key_press));
+					list_end = list_end->next;
+					list_end->next = NULL;
+
+					/* check if we've hit a combo here */
+
+					count = list_len(list_start);
+					event_cur = event_first;
+					while ( event_cur->next != NULL ) /* cycle through all events */
+					{
+						/* don't bother matching keys if the key count doesn't match
+						 * the keys pressed count */
+						if ( count == event_cur->key_count)
 					{
 						j = 0; /* set flag to 0 */
 						
@@ -261,24 +363,23 @@ int main (int argc, char **argv)
 									};
 								}
 						}
+						}
+
+						event_cur = event_cur->next;
 					}
-					
-					event_cur = event_cur->next;
-				}
-				
-				if ( ISSET(conf->opts, EBK_SHOWKEYS) ) {
-					printf(">%X<\n", ievent->code);
-					fflush(stdout);
-				}
+					if ( ISSET(conf->opts, EBK_SHOWKEYS) ) {
+						printf(">%X<\n", ievent.code);
+						fflush(stdout);
+					}
 			}
 		/* Key has been released */
-		if ( ievent->type == EV_KEY &&
-			 ievent->value == 0 )
+			if ( ievent.type == EV_KEY &&
+				 ievent.value == 0 )
 			{
 				/* remove from depressed struct */
 				list_cur = list_start;
 				list_prev = NULL;
-				while (list_cur->code != ievent->code && list_cur->next != NULL)
+					while (list_cur->code != ievent.code && list_cur->next != NULL)
 				{
 					list_prev = list_cur;
 					list_cur = list_cur->next;
@@ -304,15 +405,17 @@ int main (int argc, char **argv)
 				
 				if ( ISSET(conf->opts,EBK_SHOWKEYS) )
 				{
-					printf("<%X>\n", ievent->code);
-					fflush(stdout);
+						printf("<%X>\n", ievent.code);
+						fflush(stdout);
+					}
+
 				}
-				 
-			}
+		}
 	}
 	
 	close(eventfh);
-	
+	close(ufile);
+
 	return 0;
 }
 
