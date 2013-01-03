@@ -335,6 +335,25 @@ int filterKeyStroke(int ufile, int ufile_mouse, const struct input_event const* 
 
 	switch(pEvent->code){
 //	case KEY_POWER:
+	case KEY_PLAYCD:
+			//send the <space> keystroke
+			ievent.code = KEY_SPACE;
+			write(ufile, &ievent, sizeof(struct input_event));
+			ievent.value = EBK_KEY_UP; //KEY_UP
+			write(ufile, &ievent, sizeof(struct input_event));
+
+			bFiltered = 0;
+		break;
+			
+	case KEY_STOPCD:
+			//send the <x> keystroke
+			ievent.code = KEY_X;
+			write(ufile, &ievent, sizeof(struct input_event));
+			ievent.value = EBK_KEY_UP; //KEY_UP
+			write(ufile, &ievent, sizeof(struct input_event));
+			
+			bFiltered = 0;
+		break;
 
 	case KEY_OPTION:
 		if(bExperiment){
