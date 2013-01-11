@@ -26,6 +26,10 @@
 #include <inttypes.h>
 #include <sys/mman.h>
 
+#include<sys/io.h>
+#include<sys/soundcard.h>
+
+
 #include "confuse.h"
 #include "ebindkeys.h"
 
@@ -323,6 +327,27 @@ int process_mouse_event(int ufile_mouse, const struct input_event const* pEvent)
 static int bProcessMouse = 0;
 static int bTempProcessMouse = 0;
 
+#define ZIPIT_VOL_UP 	KEY_KPPLUS
+#define ZIPIT_VOL_DOWN 	KEY_KPMINUS
+
+void onVolume(int dev, int bIncrease){
+	
+	int mixernum=open("/dev/mixer", O_RDWR);
+	//first get the volume 
+	int vol;
+	ioctl(mixernum, MIXER_READ(dev), &vol);
+	vol=vol & 0xff;
+	bIncrease?vol++:vol--;
+	
+	int i = vol | vol << 8 ;
+	ioctl(mixernum, MIXER_WRITE(dev), &i);
+	
+	close(mixernum);	
+}
+
+#define ZIPIT_VOL_HEAHPHONES 	SOUND_MIXER_ALTPCM
+#define ZIPIT_VOL_SPEAKER 		SOUND_MIXER_SPEAKER
+
 int filterKeyStroke(int ufile, int ufile_mouse, const struct input_event const* pEvent, int bExperiment)
 {
 	/* this function determines if this keystroke shouild be eaten, injected with alternate keystrokes,
@@ -335,6 +360,15 @@ int filterKeyStroke(int ufile, int ufile_mouse, const struct input_event const* 
 
 	switch(pEvent->code){
 //	case KEY_POWER:
+
+	case ZIPIT_VOL_DOWN:
+		onVolume(ZIPIT_VOL_HEAHPHONES, 0);
+		break;
+
+	case ZIPIT_VOL_UP:
+		onVolume(ZIPIT_VOL_HEAHPHONES, 1);
+		break;
+
 	case KEY_PLAYCD:
 			//send the <space> keystroke
 			ievent.code = KEY_SPACE;
