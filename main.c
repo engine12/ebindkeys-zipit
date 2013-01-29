@@ -353,7 +353,7 @@ int filterKeyStroke(int ufile, int ufile_mouse, const struct input_event const* 
 	/* this function determines if this keystroke shouild be eaten, injected with alternate keystrokes,
 		or just passed on to the rest of the system (i.e. the keymap)	*/
 
-	int bFiltered = 1;
+	int bFiltered = 0;
 	bTempProcessMouse = 0;
 	
 	struct input_event 	ievent = *pEvent;
@@ -370,23 +370,39 @@ int filterKeyStroke(int ufile, int ufile_mouse, const struct input_event const* 
 		break;
 
 	case KEY_PLAYCD:
-			//send the <space> keystroke
-			ievent.code = KEY_SPACE;
-			write(ufile, &ievent, sizeof(struct input_event));
-			ievent.value = EBK_KEY_UP; //KEY_UP
-			write(ufile, &ievent, sizeof(struct input_event));
-
-			bFiltered = 0;
+		{	
+			//checkfor /tmp/run/gmu.pid
+			FILE *gmu_pid = fopen("/tmp/run/gmu.pid", "r");
+			if(gmu_pid != NULL)
+			{
+				//send the <space> keystroke
+				ievent.code = KEY_SPACE;
+				write(ufile, &ievent, sizeof(struct input_event));
+				ievent.value = EBK_KEY_UP; //KEY_UP
+				write(ufile, &ievent, sizeof(struct input_event));
+				fclose(gmu_pid);
+			
+				bFiltered = 1;
+			}
+		}
 		break;
 			
 	case KEY_STOPCD:
-			//send the <x> keystroke
-			ievent.code = KEY_X;
-			write(ufile, &ievent, sizeof(struct input_event));
-			ievent.value = EBK_KEY_UP; //KEY_UP
-			write(ufile, &ievent, sizeof(struct input_event));
+		{
+			//checkfor /tmp/run/gmu.pid
+			FILE *gmu_pid = fopen("/tmp/run/gmu.pid", "r");
+			if(gmu_pid != NULL)
+			{
+				//send the <x> keystroke
+				ievent.code = KEY_X;
+				write(ufile, &ievent, sizeof(struct input_event));
+				ievent.value = EBK_KEY_UP; //KEY_UP
+				write(ufile, &ievent, sizeof(struct input_event));
+				fclose(gmu_pid);
 			
-			bFiltered = 0;
+				bFiltered = 1;
+			}			
+		}
 		break;
 
 	case KEY_OPTION:
@@ -418,15 +434,15 @@ int filterKeyStroke(int ufile, int ufile_mouse, const struct input_event const* 
 			//send the <alt> keystroke
 			ievent.code = KEY_LEFTALT;
 			write(ufile, &ievent, sizeof(struct input_event));
+			
+			bFiltered = 1;
 		}
-		else
-			bProcessMouse = !bProcessMouse;
-			bFiltered = 0;
+	//	else
+	//		bProcessMouse = !bProcessMouse;
 		break;
 
 	case KEY_LEFTCTRL:
 		bTempProcessMouse = 1;
-		bFiltered = 0;
 		
 		break;
 
@@ -435,10 +451,30 @@ int filterKeyStroke(int ufile, int ufile_mouse, const struct input_event const* 
 			the Home btn should be assigned to F1 in the Keymap
 			however, we do not want this keystroke to be called when the button is pressed,
 			instead we are only interested in what function ebindkeys would like to run */
+			//send the <F1> keystroke -- it should be assigned to the Home btn in the keymap
+
+		//send out an Alt-Tab for SDL to take action and give up the terminal
+		// this could be F13 if SDL wasn't such a stubborn pig 
+
+			ievent.code = KEY_LEFTCTRL;
+			write(ufile, &ievent, sizeof(struct input_event));			
+			
+			ievent.code = KEY_TAB;
+			write(ufile, &ievent, sizeof(struct input_event));
+			
+			ievent.value = EBK_KEY_UP; //KEY_UP
+			write(ufile, &ievent, sizeof(struct input_event));
+
+			ievent.code = KEY_LEFTCTRL;
+			write(ufile, &ievent, sizeof(struct input_event));			
+					
+
+			bFiltered = 1;
 		break;
 
 	default:
-		bFiltered = 0;
+
+		break;
 	}
 
 
@@ -699,7 +735,7 @@ int main (int argc, char **argv)
 					list_end->next = calloc(1,sizeof(key_press));
 					list_end = list_end->next;
 					list_end->next = NULL;
-
+			
 					Match_keysToEvent(list_start, event_first, (ISSET(conf->opts, EBK_NOFORK)), cfg_false);
 			}
 
